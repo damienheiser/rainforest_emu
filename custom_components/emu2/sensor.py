@@ -1,8 +1,10 @@
-"""Sensor entity for a Rainforest RAVEn device."""
+"""Sensor entity for a Rainforest EMU2 device."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+"""Sensor entity for a Rainforest EMU2 device."""
+
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -23,19 +25,19 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .coordinator import RAVEnConfigEntry, RAVEnDataCoordinator
+from .coordinator import EMU2ConfigEntry, EMU2DataCoordinator
 
 
 @dataclass(frozen=True, kw_only=True)
-class RAVEnSensorEntityDescription(SensorEntityDescription):
-    """A class that describes RAVEn sensor entities."""
+class EMU2SensorEntityDescription(SensorEntityDescription):
+    """A class that describes EMU2 sensor entities."""
 
     message_key: str
     attribute_keys: list[str] | None = None
 
 
 SENSORS = (
-    RAVEnSensorEntityDescription(
+    EMU2SensorEntityDescription(
         message_key="CurrentSummationDelivered",
         translation_key="total_energy_delivered",
         key="summation_delivered",
@@ -43,7 +45,7 @@ SENSORS = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
-    RAVEnSensorEntityDescription(
+    EMU2SensorEntityDescription(
         message_key="CurrentSummationDelivered",
         translation_key="total_energy_received",
         key="summation_received",
@@ -51,7 +53,7 @@ SENSORS = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
-    RAVEnSensorEntityDescription(
+    EMU2SensorEntityDescription(
         message_key="InstantaneousDemand",
         translation_key="power_demand",
         key="demand",
@@ -63,7 +65,7 @@ SENSORS = (
 
 
 DIAGNOSTICS = (
-    RAVEnSensorEntityDescription(
+    EMU2SensorEntityDescription(
         message_key="NetworkInfo",
         translation_key="signal_strength",
         key="link_strength",
@@ -79,27 +81,27 @@ DIAGNOSTICS = (
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: RAVEnConfigEntry,
+    entry: EMU2ConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up a config entry."""
     coordinator = entry.runtime_data
-    entities: list[RAVEnSensor] = [
-        RAVEnSensor(coordinator, description) for description in DIAGNOSTICS
+    entities: list[EMU2Sensor] = [
+        EMU2Sensor(coordinator, description) for description in DIAGNOSTICS
     ]
 
     for meter_mac_addr in entry.data[CONF_MAC]:
         entities.extend(
-            RAVEnMeterSensor(coordinator, description, meter_mac_addr)
+            EMU2MeterSensor(coordinator, description, meter_mac_addr)
             for description in SENSORS
         )
 
         meter_data = coordinator.data.get("Meters", {}).get(meter_mac_addr) or {}
         if meter_data.get("PriceCluster", {}).get("currency"):
             entities.append(
-                RAVEnMeterSensor(
+                EMU2MeterSensor(
                     coordinator,
-                    RAVEnSensorEntityDescription(
+                    EMU2SensorEntityDescription(
                         message_key="PriceCluster",
                         translation_key="energy_price",
                         key="price",
@@ -117,16 +119,16 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class RAVEnSensor(CoordinatorEntity[RAVEnDataCoordinator], SensorEntity):
-    """Rainforest RAVEn Sensor."""
+class EMU2Sensor(CoordinatorEntity[EMU2DataCoordinator], SensorEntity):
+    """Rainforest EMU2 Sensor."""
 
     _attr_has_entity_name = True
-    entity_description: RAVEnSensorEntityDescription
+    entity_description: EMU2SensorEntityDescription
 
     def __init__(
         self,
-        coordinator: RAVEnDataCoordinator,
-        entity_description: RAVEnSensorEntityDescription,
+        coordinator: EMU2DataCoordinator,
+        entity_description: EMU2SensorEntityDescription,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
@@ -158,13 +160,13 @@ class RAVEnSensor(CoordinatorEntity[RAVEnDataCoordinator], SensorEntity):
         return str(self._data.get(self.entity_description.key))
 
 
-class RAVEnMeterSensor(RAVEnSensor):
-    """Rainforest RAVEn Meter Sensor."""
+class EMU2MeterSensor(EMU2Sensor):
+    """Rainforest EMU2 Meter Sensor."""
 
     def __init__(
         self,
-        coordinator: RAVEnDataCoordinator,
-        entity_description: RAVEnSensorEntityDescription,
+        coordinator: EMU2DataCoordinator,
+        entity_description: EMU2SensorEntityDescription,
         meter_mac_addr: str,
     ) -> None:
         """Initialize the sensor."""

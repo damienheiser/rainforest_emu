@@ -1,8 +1,9 @@
-"""Config flow for Rainforest RAVEn devices."""
+"""Config flow for Rainforest EMU2 devices."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 from aioraven.data import MeterType
@@ -22,7 +23,14 @@ from homeassistant.helpers.selector import (
 )
 from homeassistant.helpers.service_info.usb import UsbServiceInfo
 
-from .const import DEFAULT_NAME, DOMAIN
+from .const import (
+    CONF_DEVICE_MAC,
+    DEFAULT_DEVICE_MAC,
+    DEFAULT_NAME,
+    DOMAIN,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _format_id(value: str | int) -> str:
@@ -39,30 +47,39 @@ def _generate_unique_id(info: ListPortInfo | UsbServiceInfo) -> str:
     )
 
 
-class RainforestRavenConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Rainforest RAVEn devices."""
+class EMU2ConfigFlow(ConfigFlow, domain=DOMAIN):
+    """Handle a config flow for Rainforest EMU2 devices."""
 
     def __init__(self) -> None:
         """Set up flow instance."""
         self._dev_path: str | None = None
         self._meter_macs: set[str] = set()
+        self._emu_mac: str | None = None
 
     async def _validate_device(self, dev_path: str) -> None:
         self._abort_if_unique_id_configured(updates={CONF_DEVICE: dev_path})
-        async with (
-            asyncio.timeout(60),
-            RAVEnSerialDevice(dev_path) as raven_device,
-        ):
-            await raven_device.synchronize()
-            meters = await raven_device.get_meter_list()
-            if meters:
-                for meter in meters.meter_mac_ids or ():
-                    meter_info = await raven_device.get_meter_info(meter=meter)
-                    if meter_info and (
-                        meter_info.meter_type is None
-                        or meter_info.meter_type == MeterType.ELECTRIC
-                    ):
-                        self._meter_macs.add(meter.hex())
+        try:
+            async with (
+                asyncio.timeout(120),
+                RAVEnSerialDevice(dev_path) as raven_device,
+            ):
+                await raven_device.synchronize()
+                device_info = await raven_device.get_device_info()
+                if device_info and device_info.device_mac_id:
+                    self._emu_mac = device_info.device_mac_id.hex()
+                meters = await raven_device.get_meter_list()
+                if meters:
+                    for meter in meters.meter_mac_ids or ():
+                        meter_info = await raven_device.get_meter_info(meter=meter)
+                        if meter_info and (
+                            meter_info.meter_type is None
+                            or meter_info.meter_type == MeterType.ELECTRIC
+                        ):
+                            self._meter_macs.add(meter.hex())
+        except TimeoutError:
+            _LOGGER.warning(
+                "Timeout validating device %s; assuming device present", dev_path
+            )
         self._dev_path = dev_path
 
     async def async_step_meters(
@@ -70,33 +87,71 @@ class RainforestRavenConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Connect to device and discover meters."""
         errors: dict[str, str] = {}
+
+        if not self._meter_macs and self._emu_mac is not None:
+            return self.async_create_entry(
+                title=DEFAULT_NAME,
+                data={
+                    CONF_DEVICE: self._dev_path,
+                    CONF_MAC: [],
+                    CONF_DEVICE_MAC: self._emu_mac,
+                },
+            )
+
         if user_input is not None:
-            meter_macs = []
+            emu_mac = self._emu_mac
+            if emu_mac is None:
+                raw_emu_mac = user_input.get(CONF_DEVICE_MAC, DEFAULT_DEVICE_MAC)
+                try:
+                    emu_mac = bytes.fromhex(raw_emu_mac.replace(":", "")).hex()
+                except ValueError:
+                    errors[CONF_DEVICE_MAC] = "invalid_mac"
+
+            meter_macs: list[str] = []
             for raw_mac in user_input.get(CONF_MAC, ()):
-                mac = bytes.fromhex(raw_mac).hex()
+                try:
+                    mac = bytes.fromhex(raw_mac.replace(":", "")).hex()
+                except ValueError:
+                    errors[CONF_MAC] = "invalid_mac"
+                    break
                 if mac not in meter_macs:
                     meter_macs.append(mac)
+
+            if not self._meter_macs and not errors:
+                return self.async_create_entry(
+                    title=DEFAULT_NAME,
+                    data={
+                        CONF_DEVICE: self._dev_path,
+                        CONF_MAC: [],
+                        CONF_DEVICE_MAC: emu_mac or DEFAULT_DEVICE_MAC.replace(":", ""),
+                    },
+                )
+
             if meter_macs and not errors:
                 return self.async_create_entry(
                     title=user_input.get(CONF_NAME, DEFAULT_NAME),
                     data={
                         CONF_DEVICE: self._dev_path,
                         CONF_MAC: meter_macs,
+                        CONF_DEVICE_MAC: emu_mac or DEFAULT_DEVICE_MAC.replace(":", ""),
                     },
                 )
 
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_MAC): SelectSelector(
-                    SelectSelectorConfig(
-                        options=sorted(self._meter_macs),
-                        mode=SelectSelectorMode.DROPDOWN,
-                        multiple=True,
-                        translation_key=CONF_MAC,
-                    )
-                ),
-            }
-        )
+        fields: dict[Any, Any] = {}
+        if self._meter_macs:
+            fields[vol.Required(CONF_MAC)] = SelectSelector(
+                SelectSelectorConfig(
+                    options=sorted(self._meter_macs),
+                    mode=SelectSelectorMode.DROPDOWN,
+                    multiple=True,
+                    translation_key=CONF_MAC,
+                )
+            )
+        if self._emu_mac is None:
+            fields[vol.Required(CONF_DEVICE_MAC, default=DEFAULT_DEVICE_MAC)] = str
+
+        schema = vol.Schema(fields)
+
         return self.async_show_form(step_id="meters", data_schema=schema, errors=errors)
 
     async def async_step_usb(self, discovery_info: UsbServiceInfo) -> ConfigFlowResult:
@@ -107,8 +162,6 @@ class RainforestRavenConfigFlow(ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(unique_id)
         try:
             await self._validate_device(dev_path)
-        except TimeoutError:
-            return self.async_abort(reason="timeout_connect")
         except RAVEnConnectionError:
             return self.async_abort(reason="cannot_connect")
         return await self.async_step_meters()
@@ -148,8 +201,6 @@ class RainforestRavenConfigFlow(ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(unique_id)
             try:
                 await self._validate_device(dev_path)
-            except TimeoutError:
-                errors[CONF_DEVICE] = "timeout_connect"
             except RAVEnConnectionError:
                 errors[CONF_DEVICE] = "cannot_connect"
             else:

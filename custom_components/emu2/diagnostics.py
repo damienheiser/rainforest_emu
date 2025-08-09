@@ -1,4 +1,4 @@
-"""Diagnostics support for a Rainforest RAVEn device."""
+"""Diagnostics support for a Rainforest EMU2 device."""
 
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_MAC
 from homeassistant.core import HomeAssistant, callback
 
-from .coordinator import RAVEnConfigEntry
+from .coordinator import EMU2ConfigEntry
+from .const import CONF_DEVICE_MAC
 
-TO_REDACT_CONFIG = {CONF_MAC}
+TO_REDACT_CONFIG = {CONF_MAC, CONF_DEVICE_MAC}
 TO_REDACT_DATA = {"device_mac_id", "meter_mac_id"}
 
 
@@ -29,7 +30,7 @@ def async_redact_meter_macs(data: dict) -> dict:
 
 
 async def async_get_config_entry_diagnostics(
-    hass: HomeAssistant, config_entry: RAVEnConfigEntry
+    hass: HomeAssistant, config_entry: EMU2ConfigEntry
 ) -> Mapping[str, Any]:
     """Return diagnostics for a config entry."""
 
