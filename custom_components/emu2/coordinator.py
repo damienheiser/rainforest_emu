@@ -1,4 +1,4 @@
-"""Data update coordination for Rainforest RAVEn devices."""
+"""Data update coordination for Rainforest EMU2 devices."""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ import asyncio
 from dataclasses import asdict
 from datetime import timedelta
 import logging
+import os
+import signal
+import subprocess
 from typing import Any
 
 from aioraven.data import DeviceInfo as RAVEnDeviceInfo
@@ -18,9 +21,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN
+from .const import CONF_DEVICE_MAC, DOMAIN
 
-type RAVEnConfigEntry = ConfigEntry[RAVEnDataCoordinator]
+type EMU2ConfigEntry = ConfigEntry["EMU2DataCoordinator"]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,14 +67,14 @@ async def _get_all_data(
     return data
 
 
-class RAVEnDataCoordinator(DataUpdateCoordinator):
-    """Communication coordinator for a Rainforest RAVEn device."""
+class EMU2DataCoordinator(DataUpdateCoordinator):
+    """Communication coordinator for a Rainforest EMU2 device."""
 
     _raven_device: RAVEnSerialDevice | None = None
     _device_info: RAVEnDeviceInfo | None = None
-    config_entry: RAVEnConfigEntry
+    config_entry: EMU2ConfigEntry
 
-    def __init__(self, hass: HomeAssistant, entry: RAVEnConfigEntry) -> None:
+    def __init__(self, hass: HomeAssistant, entry: EMU2ConfigEntry) -> None:
         """Initialize the data object."""
         super().__init__(
             hass,
@@ -86,24 +89,25 @@ class RAVEnDataCoordinator(DataUpdateCoordinator):
         """Return the MAC address of the device."""
         if self._device_info and self._device_info.device_mac_id:
             return self._device_info.device_mac_id.hex()
-        return None
+        return self.config_entry.data.get(CONF_DEVICE_MAC)
 
     @property
     def device_info(self) -> DeviceInfo | None:
         """Return device info."""
-        if (device_info := self._device_info) and (
-            mac_address := self.device_mac_address
-        ):
+        mac_address = self.device_mac_address
+        if not mac_address:
+            return None
+        if device_info := self._device_info:
             return DeviceInfo(
                 identifiers={(DOMAIN, mac_address)},
                 manufacturer=device_info.manufacturer,
                 model=device_info.model_id,
                 model_id=device_info.model_id,
-                name="RAVEn Device",
+                name="Rainforest EMU2",
                 sw_version=device_info.fw_version,
                 hw_version=device_info.hw_version,
             )
-        return None
+        return DeviceInfo(identifiers={(DOMAIN, mac_address)}, name="Rainforest EMU2")
 
     async def async_shutdown(self) -> None:
         """Shutdown the coordinator."""
@@ -113,14 +117,14 @@ class RAVEnDataCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             device = await self._get_device()
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(30):
                 return await _get_all_data(device, self.config_entry.data[CONF_MAC])
         except RAVEnConnectionError as err:
             await self._cleanup_device()
             raise UpdateFailed(f"RAVEnConnectionError: {err}") from err
         except TimeoutError:
-            await self._cleanup_device()
-            raise
+            _LOGGER.warning("Timeout while updating data; using last known values")
+            return self.data
 
     async def _cleanup_device(self) -> None:
         device, self._raven_device = self._raven_device, None
@@ -131,16 +135,49 @@ class RAVEnDataCoordinator(DataUpdateCoordinator):
         if self._raven_device is not None:
             return self._raven_device
 
+        await self._kill_serial_hooks()
+
         device = RAVEnSerialDevice(self.config_entry.data[CONF_DEVICE])
 
         try:
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(20):
                 await device.open()
                 await device.synchronize()
                 self._device_info = await device.get_device_info()
-        except:
+        except TimeoutError:
+            _LOGGER.warning("Timeout opening device; assuming device is ready")
+        except Exception:
             await device.abort()
             raise
 
         self._raven_device = device
         return device
+
+    async def _kill_serial_hooks(self) -> None:
+        """Terminate other processes using the serial device."""
+        dev_path = self.config_entry.data[CONF_DEVICE]
+
+        def _kill() -> None:
+            try:
+                subprocess.run(
+                    ["fuser", "-k", dev_path],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except FileNotFoundError:
+                try:
+                    pids = subprocess.check_output(["lsof", "-t", dev_path]).split()
+                except (FileNotFoundError, subprocess.CalledProcessError):
+                    return
+                for pid in pids:
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except OSError:
+                        continue
+
+        await self.hass.async_add_executor_job(_kill)
+
+    async def async_open_device(self) -> None:
+        """Ensure the serial device is opened when the integration loads."""
+        await self._get_device()
